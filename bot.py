@@ -1,9 +1,7 @@
 import discord
 from discord import app_commands
-from discord.ext import tasks
-
-import requests
 import os
+import json
 
 from dotenv import load_dotenv
 
@@ -18,10 +16,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 
 GUILD_ID = 1537916356559765545
 
-# Default Roblox player
-PLAYER_USERNAME = "Weidergamer46"
-PLAYER_ID = 3746020391
-PLAYER_DISPLAY_NAME = "Will"
+SETTINGS_FILE = "settings.json"
 
 
 # ============================================================
@@ -44,471 +39,61 @@ GUILD = discord.Object(
 
 
 # ============================================================
-# WATCHER STATE
+# SETTINGS
 # ============================================================
 
-watching = False
+def load_settings():
 
-previous_status = None
-previous_game = None
+    if not os.path.exists(SETTINGS_FILE):
+        return {}
 
-watch_channel = None
+    with open(
+        SETTINGS_FILE,
+        "r",
+        encoding="utf-8"
+    ) as file:
 
-
-# ============================================================
-# GAME CACHE
-# ============================================================
-
-# Saves successful lookups so we don't repeatedly
-# ask Roblox for the same game's name.
-
-game_cache = {}
+        return json.load(file)
 
 
-# ============================================================
-# ROBLOX SESSION
-# ============================================================
+def save_settings(settings):
 
-session = requests.Session()
+    with open(
+        SETTINGS_FILE,
+        "w",
+        encoding="utf-8"
+    ) as file:
 
-session.headers.update({
-    "User-Agent": "RobloxStatusChecker/1.0",
-    "Accept": "application/json",
-    "Content-Type": "application/json"
-})
-
-
-# ============================================================
-# ROBLOX PRESENCE
-# ============================================================
-
-def get_roblox_presence():
-
-    url = (
-        "https://presence.roblox.com/"
-        "v1/presence/users"
-    )
-
-    payload = {
-        "userIds": [
-            PLAYER_ID
-        ]
-    }
-
-    response = session.post(
-        url,
-        json=payload,
-        timeout=10
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    presences = data.get(
-        "userPresences",
-        []
-    )
-
-    if not presences:
-
-        raise RuntimeError(
-            "Roblox returned no presence data."
-        )
-
-    presence = presences[0]
-
-    print(
-        "DEBUG - Full Roblox presence:"
-    )
-
-    print(
-        presence
-    )
-
-    return presence
-
-
-# ============================================================
-# STATUS TEXT
-# ============================================================
-
-def get_status_text(presence):
-
-    presence_type = presence.get(
-        "userPresenceType"
-    )
-
-    if presence_type == 0:
-        return "Offline"
-
-    if presence_type == 1:
-        return "Online"
-
-    if presence_type == 2:
-        return "In Game"
-
-    if presence_type == 3:
-        return "In Roblox Studio"
-
-    if presence_type == 4:
-        return "Invisible"
-
-    return "Unknown"
-
-
-# ============================================================
-# GAME LOOKUP
-# ============================================================
-
-def get_game_name_from_universe(
-    universe_id
-):
-
-    if not universe_id:
-        return None
-
-    # Convert to string because Roblox IDs
-    # can sometimes arrive as integers.
-
-    universe_id = str(
-        universe_id
-    )
-
-    # --------------------------------------------------------
-    # CACHE
-    # --------------------------------------------------------
-
-    if universe_id in game_cache:
-
-        print(
-            f"DEBUG - Game cache hit: "
-            f"{universe_id}"
-        )
-
-        return game_cache[
-            universe_id
-        ]
-
-
-    # --------------------------------------------------------
-    # API REQUEST
-    # --------------------------------------------------------
-
-    url = (
-        "https://games.roblox.com/"
-        "v1/games"
-    )
-
-    params = {
-        "universeIds": universe_id
-    }
-
-    try:
-
-        response = session.get(
-            url,
-            params=params,
-            timeout=10
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        games = data.get(
-            "data",
-            []
-        )
-
-        if not games:
-
-            print(
-                f"DEBUG - No game returned "
-                f"for universe {universe_id}"
-            )
-
-            return None
-
-
-        game_name = games[0].get(
-            "name"
+        json.dump(
+            settings,
+            file,
+            indent=4
         )
 
 
-        if game_name:
-
-            game_cache[
-                universe_id
-            ] = game_name
-
-            print(
-                f"DEBUG - Universe "
-                f"{universe_id} = "
-                f"{game_name}"
-            )
-
-            return game_name
-
-
-    except requests.RequestException as error:
-
-        print(
-            f"⚠️ Universe lookup failed: "
-            f"{error}"
-        )
-
-
-    return None
+settings = load_settings()
 
 
 # ============================================================
-# PLACE ID → UNIVERSE ID
+# ADMIN CHECK
 # ============================================================
 
-def get_universe_from_place(
-    place_id
-):
+def administrator_only():
 
-    if not place_id:
-        return None
+    async def predicate(
+        interaction: discord.Interaction
+    ):
 
-    url = (
-        "https://apis.roblox.com/"
-        "universes/v1/places/"
-        f"{place_id}/universe"
-    )
+        if interaction.guild is None:
+            return False
 
-    try:
+        return interaction.user.guild_permissions.administrator
 
-        response = session.get(
-            url,
-            timeout=10
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        universe_id = data.get(
-            "universeId"
-        )
-
-        if universe_id:
-
-            print(
-                f"DEBUG - Place "
-                f"{place_id} → Universe "
-                f"{universe_id}"
-            )
-
-        return universe_id
-
-
-    except requests.RequestException as error:
-
-        print(
-            f"⚠️ Place → universe lookup "
-            f"failed: {error}"
-        )
-
-        return None
+    return app_commands.check(predicate)
 
 
 # ============================================================
-# CURRENT GAME DETECTION
-# ============================================================
-
-def get_current_game(
-    presence
-):
-
-    # ========================================================
-    # METHOD 1
-    # Direct universeId
-    # ========================================================
-
-    universe_id = presence.get(
-        "universeId"
-    )
-
-    if universe_id:
-
-        print(
-            f"DEBUG - Presence supplied "
-            f"universeId: {universe_id}"
-        )
-
-        game_name = (
-            get_game_name_from_universe(
-                universe_id
-            )
-        )
-
-        if game_name:
-            return game_name
-
-
-    # ========================================================
-    # METHOD 2
-    # placeId → universeId
-    # ========================================================
-
-    place_id = presence.get(
-        "placeId"
-    )
-
-    if place_id:
-
-        print(
-            f"DEBUG - Presence supplied "
-            f"placeId: {place_id}"
-        )
-
-        universe_id = (
-            get_universe_from_place(
-                place_id
-            )
-        )
-
-        if universe_id:
-
-            game_name = (
-                get_game_name_from_universe(
-                    universe_id
-                )
-            )
-
-            if game_name:
-                return game_name
-
-
-    # ========================================================
-    # METHOD 3
-    # rootPlaceId → universeId
-    # ========================================================
-
-    root_place_id = presence.get(
-        "rootPlaceId"
-    )
-
-    if root_place_id:
-
-        print(
-            f"DEBUG - Presence supplied "
-            f"rootPlaceId: "
-            f"{root_place_id}"
-        )
-
-        universe_id = (
-            get_universe_from_place(
-                root_place_id
-            )
-        )
-
-        if universe_id:
-
-            game_name = (
-                get_game_name_from_universe(
-                    universe_id
-                )
-            )
-
-            if game_name:
-                return game_name
-
-
-    # ========================================================
-    # METHOD 4
-    # lastLocation
-    # ========================================================
-
-    last_location = presence.get(
-        "lastLocation"
-    )
-
-    if last_location:
-
-        print(
-            f"DEBUG - Using lastLocation: "
-            f"{last_location}"
-        )
-
-        return last_location
-
-
-    # ========================================================
-    # NOTHING AVAILABLE
-    # ========================================================
-
-    print(
-        "⚠️ Roblox says the player is "
-        "In Game, but the experience "
-        "information is unavailable."
-    )
-
-    print(
-        "DEBUG - placeId:",
-        presence.get("placeId")
-    )
-
-    print(
-        "DEBUG - rootPlaceId:",
-        presence.get("rootPlaceId")
-    )
-
-    print(
-        "DEBUG - gameId:",
-        presence.get("gameId")
-    )
-
-    print(
-        "DEBUG - universeId:",
-        presence.get("universeId")
-    )
-
-    print(
-        "DEBUG - lastLocation:",
-        presence.get("lastLocation")
-    )
-
-    return None
-
-
-# ============================================================
-# CURRENT PLAYER STATE
-# ============================================================
-
-def get_current_player_state():
-
-    presence = (
-        get_roblox_presence()
-    )
-
-    current_status = (
-        get_status_text(
-            presence
-        )
-    )
-
-    current_game = None
-
-    if current_status == "In Game":
-
-        current_game = (
-            get_current_game(
-                presence
-            )
-        )
-
-    return (
-        current_status,
-        current_game
-    )
-
-
-# ============================================================
-# DISCORD READY
+# BOT READY
 # ============================================================
 
 @client.event
@@ -523,7 +108,7 @@ async def on_ready():
     )
 
     print(
-        "Roblox Status Checker is online."
+        "Larper of Yesterday is online."
     )
 
     print(
@@ -532,882 +117,411 @@ async def on_ready():
 
 
 # ============================================================
-# /PING
+# /ping
 # ============================================================
 
 @tree.command(
     name="ping",
-    description="Check if the bot is working.",
+    description="Check if Larper of Yesterday is working.",
     guild=GUILD
 )
+@administrator_only()
 async def ping(
     interaction: discord.Interaction
 ):
 
     await interaction.response.send_message(
-        "Pong! 🏓"
+        "Pong! 🏓",
+        ephemeral=True
     )
 
 
 # ============================================================
-# /STATUS
+# /setrole
 # ============================================================
 
 @tree.command(
-    name="status",
-    description=(
-        "Immediately check the Roblox "
-        "player's current status."
-    ),
-    guild=GUILD
-)
-async def status(
-    interaction: discord.Interaction
-):
-
-    try:
-
-        presence = (
-            get_roblox_presence()
-        )
-
-        current_status = (
-            get_status_text(
-                presence
-            )
-        )
-
-        # ----------------------------------------------------
-        # IN GAME
-        # ----------------------------------------------------
-
-        if current_status == "In Game":
-
-            game_name = (
-                get_current_game(
-                    presence
-                )
-            )
-
-            if game_name:
-
-                await interaction.response.send_message(
-                    f"**{PLAYER_DISPLAY_NAME}** "
-                    f"(**{PLAYER_USERNAME}**) "
-                    f"is currently **In Game** 🎮\n"
-                    f"Playing: **{game_name}**"
-                )
-
-            else:
-
-                await interaction.response.send_message(
-                    f"**{PLAYER_DISPLAY_NAME}** "
-                    f"(**{PLAYER_USERNAME}**) "
-                    f"is currently **In Game** 🎮\n"
-                    f"⚠️ Roblox is hiding the "
-                    f"experience information."
-                )
-
-            return
-
-
-        # ----------------------------------------------------
-        # OTHER STATUS
-        # ----------------------------------------------------
-
-        await interaction.response.send_message(
-            f"**{PLAYER_DISPLAY_NAME}** "
-            f"(**{PLAYER_USERNAME}**) "
-            f"is currently "
-            f"**{current_status}**."
-        )
-
-
-    except requests.RequestException as error:
-
-        print(
-            f"❌ Status lookup failed: "
-            f"{error}"
-        )
-
-        await interaction.response.send_message(
-            "❌ Roblox's presence service "
-            "could not be reached."
-        )
-
-
-    except Exception as error:
-
-        print(
-            f"❌ Status command error: "
-            f"{error}"
-        )
-
-        await interaction.response.send_message(
-            "❌ Something went wrong while "
-            "checking the player's status."
-        )
-
-
-# ============================================================
-# /STARTWATCH
-# ============================================================
-
-@tree.command(
-    name="startwatch",
-    description=(
-        "Start monitoring the Roblox "
-        "player every 30 seconds."
-    ),
-    guild=GUILD
-)
-async def startwatch(
-    interaction: discord.Interaction
-):
-
-    global watching
-    global watch_channel
-    global previous_status
-    global previous_game
-
-
-    if watching:
-
-        await interaction.response.send_message(
-            f"👀 **{PLAYER_DISPLAY_NAME}** "
-            f"(**{PLAYER_USERNAME}**) "
-            f"is already being watched."
-        )
-
-        return
-
-
-    # --------------------------------------------------------
-    # INITIAL LOOKUP
-    # --------------------------------------------------------
-
-    try:
-
-        presence = (
-            get_roblox_presence()
-        )
-
-        previous_status = (
-            get_status_text(
-                presence
-            )
-        )
-
-        previous_game = None
-
-        if previous_status == "In Game":
-
-            previous_game = (
-                get_current_game(
-                    presence
-                )
-            )
-
-
-    except requests.RequestException as error:
-
-        print(
-            f"❌ Initial watcher lookup "
-            f"failed: {error}"
-        )
-
-        await interaction.response.send_message(
-            "❌ I couldn't get the player's "
-            "current Roblox status."
-        )
-
-        return
-
-
-    except Exception as error:
-
-        print(
-            f"❌ Initial watcher error: "
-            f"{error}"
-        )
-
-        await interaction.response.send_message(
-            "❌ Something went wrong while "
-            "starting the watcher."
-        )
-
-        return
-
-
-    # --------------------------------------------------------
-    # START WATCHER
-    # --------------------------------------------------------
-
-    watching = True
-
-    watch_channel = (
-        interaction.channel
-    )
-
-    watch_loop.start()
-
-
-    # --------------------------------------------------------
-    # CONFIRMATION
-    # --------------------------------------------------------
-
-    message = (
-        f"👀 Started watching "
-        f"**{PLAYER_DISPLAY_NAME}** "
-        f"(**{PLAYER_USERNAME}**) "
-        f"every 30 seconds.\n"
-        f"Current status: "
-        f"**{previous_status}**"
-    )
-
-
-    if previous_game:
-
-        message += (
-            f"\n🎮 Playing: "
-            f"**{previous_game}**"
-        )
-
-    elif previous_status == "In Game":
-
-        message += (
-            "\n⚠️ Roblox isn't providing "
-            "the experience information."
-        )
-
-
-    await interaction.response.send_message(
-        message
-    )
-
-
-# ============================================================
-# /STOPWATCH
-# ============================================================
-
-@tree.command(
-    name="stopwatch",
-    description=(
-        "Stop monitoring the Roblox player."
-    ),
-    guild=GUILD
-)
-async def stopwatch(
-    interaction: discord.Interaction
-):
-
-    global watching
-    global previous_status
-    global previous_game
-    global watch_channel
-
-
-    if not watching:
-
-        await interaction.response.send_message(
-            "😴 I'm not currently watching anyone."
-        )
-
-        return
-
-
-    watching = False
-
-    previous_status = None
-
-    previous_game = None
-
-    watch_channel = None
-
-
-    if watch_loop.is_running():
-
-        watch_loop.cancel()
-
-
-    await interaction.response.send_message(
-        "🛑 Automatic monitoring stopped."
-    )
-
-
-# ============================================================
-# /PLAYER
-# ============================================================
-
-@tree.command(
-    name="player",
-    description=(
-        "Show the Roblox account currently "
-        "being monitored."
-    ),
-    guild=GUILD
-)
-async def player(
-    interaction: discord.Interaction
-):
-
-    await interaction.response.send_message(
-        f"👤 Currently monitoring "
-        f"**{PLAYER_DISPLAY_NAME}** "
-        f"(**{PLAYER_USERNAME}**)\n"
-        f"ID: `{PLAYER_ID}`"
-    )
-
-
-# ============================================================
-# /WATCHSTATUS
-# ============================================================
-
-@tree.command(
-    name="watchstatus",
-    description=(
-        "Show whether automatic monitoring "
-        "is running."
-    ),
-    guild=GUILD
-)
-async def watchstatus(
-    interaction: discord.Interaction
-):
-
-    if watching:
-
-        await interaction.response.send_message(
-            f"🟢 Automatic monitoring is "
-            f"**running**.\n"
-            f"Watching: "
-            f"**{PLAYER_DISPLAY_NAME}** "
-            f"(**{PLAYER_USERNAME}**)"
-        )
-
-    else:
-
-        await interaction.response.send_message(
-            "🔴 Automatic monitoring is "
-            " **stopped**."
-        )
-
-
-# ============================================================
-# /SETPLAYER
-# ============================================================
-
-@tree.command(
-    name="setplayer",
-    description=(
-        "Change the Roblox account "
-        "being monitored."
-    ),
+    name="setrole",
+    description="Set the role used when someone is ripped.",
     guild=GUILD
 )
 @app_commands.describe(
-    username=(
-        "The Roblox username to monitor"
-    )
+    role="The role that will be given to dead users."
 )
-async def setplayer(
+@administrator_only()
+async def setrole(
     interaction: discord.Interaction,
-    username: str
+    role: discord.Role
 ):
 
-    global PLAYER_USERNAME
-    global PLAYER_DISPLAY_NAME
-    global PLAYER_ID
-    global previous_status
-    global previous_game
+    bot_member = interaction.guild.me
 
+    if bot_member is None:
 
-    url = (
-        "https://users.roblox.com/"
-        "v1/usernames/users"
-    )
+        await interaction.response.send_message(
+            "❌ I couldn't determine my role in this server.",
+            ephemeral=True
+        )
 
-    payload = {
-        "usernames": [
-            username
-        ],
-        "excludeBannedUsers": False
+        return
+
+    if role >= bot_member.top_role:
+
+        await interaction.response.send_message(
+            "❌ I can't use that role because it's higher than or equal to my highest role.",
+            ephemeral=True
+        )
+
+        return
+
+    settings[str(interaction.guild.id)] = {
+        "death_role_id": role.id
     }
 
-
-    # --------------------------------------------------------
-    # USER LOOKUP
-    # --------------------------------------------------------
-
-    try:
-
-        response = session.post(
-            url,
-            json=payload,
-            timeout=10
-        )
-
-        response.raise_for_status()
-
-        users = response.json().get(
-            "data",
-            []
-        )
-
-
-    except requests.RequestException as error:
-
-        print(
-            f"❌ User lookup failed: "
-            f"{error}"
-        )
-
-        await interaction.response.send_message(
-            "❌ Roblox's user lookup failed."
-        )
-
-        return
-
-
-    if not users:
-
-        await interaction.response.send_message(
-            f"❌ I couldn't find a Roblox "
-            f"user named `{username}`."
-        )
-
-        return
-
-
-    # --------------------------------------------------------
-    # USER INFORMATION
-    # --------------------------------------------------------
-
-    new_username = users[0][
-        "name"
-    ]
-
-    new_display_name = users[0][
-        "displayName"
-    ]
-
-    new_id = users[0][
-        "id"
-    ]
-
-
-    # --------------------------------------------------------
-    # ALREADY SELECTED
-    # --------------------------------------------------------
-
-    if new_id == PLAYER_ID:
-
-        await interaction.response.send_message(
-            f"👀 **{PLAYER_DISPLAY_NAME}** "
-            f"(**{PLAYER_USERNAME}**) "
-            f"is already being watched."
-        )
-
-        return
-
-
-    # --------------------------------------------------------
-    # UPDATE PLAYER
-    # --------------------------------------------------------
-
-    PLAYER_USERNAME = (
-        new_username
-    )
-
-    PLAYER_DISPLAY_NAME = (
-        new_display_name
-    )
-
-    PLAYER_ID = new_id
-
-
-    # --------------------------------------------------------
-    # REFRESH WATCHER BASELINE
-    # --------------------------------------------------------
-
-    if watching:
-
-        try:
-
-            presence = (
-                get_roblox_presence()
-            )
-
-            previous_status = (
-                get_status_text(
-                    presence
-                )
-            )
-
-            previous_game = None
-
-            if previous_status == "In Game":
-
-                previous_game = (
-                    get_current_game(
-                        presence
-                    )
-                )
-
-        except Exception as error:
-
-            print(
-                f"⚠️ Failed to refresh "
-                f"watcher state: {error}"
-            )
-
-            previous_status = None
-
-            previous_game = None
-
-
-    else:
-
-        previous_status = None
-
-        previous_game = None
-
+    save_settings(settings)
 
     await interaction.response.send_message(
-        f"✅ Now monitoring "
-        f"**{PLAYER_DISPLAY_NAME}** "
-        f"(**{PLAYER_USERNAME}**)\n"
-        f"ID: `{PLAYER_ID}`"
+        f"✅ Death role set to {role.mention}.",
+        ephemeral=True
     )
 
 
 # ============================================================
-# /HELP
+# /rip
+# ============================================================
+
+@tree.command(
+    name="rip",
+    description="Rip a user in half. ☠️",
+    guild=GUILD
+)
+@app_commands.describe(
+    user="The user you want to rip."
+)
+@administrator_only()
+async def rip(
+    interaction: discord.Interaction,
+    user: discord.Member
+):
+
+    guild_id = str(interaction.guild.id)
+
+    # Check if a death role has been configured
+    if guild_id not in settings:
+
+        await interaction.response.send_message(
+            "❌ No death role has been configured yet. Use /setrole first.",
+            ephemeral=True
+        )
+
+        return
+
+    death_role_id = settings[guild_id].get(
+        "death_role_id"
+    )
+
+    if not death_role_id:
+
+        await interaction.response.send_message(
+            "❌ No death role has been configured yet. Use /setrole first.",
+            ephemeral=True
+        )
+
+        return
+
+    death_role = interaction.guild.get_role(
+        death_role_id
+    )
+
+    if death_role is None:
+
+        await interaction.response.send_message(
+            "❌ The configured death role no longer exists.",
+            ephemeral=True
+        )
+
+        return
+
+    # Already dead?
+    if death_role in user.roles:
+
+        await interaction.response.send_message(
+            f"❌ {user.mention} is already dead. You can't rip them again. 😭",
+            ephemeral=True
+        )
+
+        return
+
+    bot_member = interaction.guild.me
+
+    if bot_member is None:
+
+        await interaction.response.send_message(
+            "❌ I couldn't determine my role in this server.",
+            ephemeral=True
+        )
+
+        return
+
+    # Check target's highest role against bot's highest role
+    if user.top_role >= bot_member.top_role:
+
+        await interaction.response.send_message(
+            "❌ I can't rip this user because their highest role is higher than or equal to mine.",
+            ephemeral=True
+        )
+
+        return
+
+    # Check the death role itself
+    if death_role >= bot_member.top_role:
+
+        await interaction.response.send_message(
+            "❌ I can't give the RIP role because it's higher than or equal to my highest role.",
+            ephemeral=True
+        )
+
+        return
+
+    try:
+
+        await user.add_roles(
+            death_role,
+            reason=f"Ripped by {interaction.user}"
+        )
+
+    except discord.Forbidden:
+
+        await interaction.response.send_message(
+            "❌ I don't have permission to give the RIP role to this user.",
+            ephemeral=True
+        )
+
+        return
+
+    # Public announcement
+    await interaction.response.send_message(
+        f"💀 {user.mention} has been ripped in half."
+    )
+
+
+# ============================================================
+# /revive
+# ============================================================
+
+@tree.command(
+    name="revive",
+    description="Bring a dead user back to life. ❤️",
+    guild=GUILD
+)
+@app_commands.describe(
+    user="The user you want to revive."
+)
+@administrator_only()
+async def revive(
+    interaction: discord.Interaction,
+    user: discord.Member
+):
+
+    guild_id = str(interaction.guild.id)
+
+    # Check if a death role has been configured
+    if guild_id not in settings:
+
+        await interaction.response.send_message(
+            "❌ No death role has been configured yet. Use /setrole first.",
+            ephemeral=True
+        )
+
+        return
+
+    death_role_id = settings[guild_id].get(
+        "death_role_id"
+    )
+
+    if not death_role_id:
+
+        await interaction.response.send_message(
+            "❌ No death role has been configured yet. Use /setrole first.",
+            ephemeral=True
+        )
+
+        return
+
+    death_role = interaction.guild.get_role(
+        death_role_id
+    )
+
+    if death_role is None:
+
+        await interaction.response.send_message(
+            "❌ The configured death role no longer exists.",
+            ephemeral=True
+        )
+
+        return
+
+    # Already alive?
+    if death_role not in user.roles:
+
+        await interaction.response.send_message(
+            f"❌ {user.mention} is already alive. What are you reviving? 😭",
+            ephemeral=True
+        )
+
+        return
+
+    bot_member = interaction.guild.me
+
+    if bot_member is None:
+
+        await interaction.response.send_message(
+            "❌ I couldn't determine my role in this server.",
+            ephemeral=True
+        )
+
+        return
+
+    if death_role >= bot_member.top_role:
+
+        await interaction.response.send_message(
+            "❌ I can't remove the RIP role because it's higher than or equal to my highest role.",
+            ephemeral=True
+        )
+
+        return
+
+    try:
+
+        await user.remove_roles(
+            death_role,
+            reason=f"Revived by {interaction.user}"
+        )
+
+    except discord.Forbidden:
+
+        await interaction.response.send_message(
+            "❌ I don't have permission to remove the RIP role from this user.",
+            ephemeral=True
+        )
+
+        return
+
+    # Public announcement
+    await interaction.response.send_message(
+        f"❤️ {user.mention} has been revived."
+    )
+
+
+# ============================================================
+# /help
 # ============================================================
 
 @tree.command(
     name="help",
-    description=(
-        "Show all available commands."
-    ),
+    description="Show the Larper of Yesterday command list.",
     guild=GUILD
 )
+@administrator_only()
 async def help_command(
     interaction: discord.Interaction
 ):
 
-    message = (
-        "**🤖 Roblox Status Checker**\n\n"
-
-        "**`/ping`**\n"
-        "Checks if the bot is working.\n\n"
-
-        "**`/status`**\n"
-        "Immediately checks the player's "
-        "current status and experience.\n\n"
-
-        "**`/startwatch`**\n"
-        "Starts automatic monitoring every "
-        "30 seconds.\n\n"
-
-        "**`/stopwatch`**\n"
-        "Stops automatic monitoring.\n\n"
-
-        "**`/setplayer username:`**\n"
-        "Changes the Roblox account being "
-        "monitored.\n\n"
-
-        "**`/player`**\n"
-        "Shows the currently monitored "
-        "Roblox account.\n\n"
-
-        "**`/watchstatus`**\n"
-        "Shows whether automatic monitoring "
-        "is running.\n\n"
-
-        "**`/help`**\n"
-        "Shows this help message."
+    embed = discord.Embed(
+        title="☠️ Larper of Yesterday",
+        description="Command list",
+        color=discord.Color.red()
     )
 
+    embed.add_field(
+        name="/ping",
+        value="Check if the bot is working. 🏓",
+        inline=False
+    )
+
+    embed.add_field(
+        name="/rip @user",
+        value="Rips a user in half. ☠️",
+        inline=False
+    )
+
+    embed.add_field(
+        name="/revive @user",
+        value="Brings a dead user back to life. ❤️",
+        inline=False
+    )
+
+    embed.add_field(
+        name="/setrole @role",
+        value="Sets the role used for dead users. 🔧",
+        inline=False
+    )
+
+    embed.add_field(
+        name="/help",
+        value="Shows this command list. 📖",
+        inline=False
+    )
 
     await interaction.response.send_message(
-        message
+        embed=embed,
+        ephemeral=True
     )
 
 
 # ============================================================
-# 30-SECOND WATCHER
+# GLOBAL APP COMMAND ERROR HANDLER
 # ============================================================
 
-@tasks.loop(
-    seconds=30
-)
-async def watch_loop():
+@tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError
+):
 
-    global previous_status
-    global previous_game
+    if isinstance(
+        error,
+        app_commands.CheckFailure
+    ):
 
-
-    try:
-
-        # ----------------------------------------------------
-        # GET PRESENCE
-        # ----------------------------------------------------
-
-        presence = (
-            get_roblox_presence()
+        message = (
+            "❌ You need Administrator permissions "
+            "to use Larper of Yesterday commands."
         )
 
-        current_status = (
-            get_status_text(
-                presence
+        if interaction.response.is_done():
+
+            await interaction.followup.send(
+                message,
+                ephemeral=True
             )
-        )
-
-
-        print(
-            f"Checked "
-            f"{PLAYER_DISPLAY_NAME} "
-            f"({PLAYER_USERNAME}): "
-            f"{current_status}"
-        )
-
-
-        # ----------------------------------------------------
-        # GET CURRENT GAME
-        # ----------------------------------------------------
-
-        current_game = None
-
-        if current_status == "In Game":
-
-            current_game = (
-                get_current_game(
-                    presence
-                )
-            )
-
-            if current_game:
-
-                print(
-                    f"Currently playing: "
-                    f"{current_game}"
-                )
-
-            else:
-
-                print(
-                    "In Game, but Roblox "
-                    "did not expose the "
-                    "experience."
-                )
-
-
-        # ----------------------------------------------------
-        # FIRST CHECK
-        # ----------------------------------------------------
-
-        if previous_status is None:
-
-            previous_status = (
-                current_status
-            )
-
-            previous_game = (
-                current_game
-            )
-
-            print(
-                "Watcher baseline established."
-            )
-
-            return
-
-
-        # ----------------------------------------------------
-        # SAME STATUS
-        # ----------------------------------------------------
-
-        if current_status == previous_status:
-
-            # ------------------------------------------------
-            # GAME CHANGED
-            # ------------------------------------------------
-
-            if (
-                current_status == "In Game"
-                and current_game != previous_game
-            ):
-
-                old_game = (
-                    previous_game
-                )
-
-                previous_game = (
-                    current_game
-                )
-
-
-                if watch_channel is not None:
-
-                    # ----------------------------------------
-                    # NEW GAME FOUND
-                    # ----------------------------------------
-
-                    if current_game:
-
-                        if old_game:
-
-                            message = (
-                                f"🎮 "
-                                f"**{PLAYER_DISPLAY_NAME}** "
-                                f"(**{PLAYER_USERNAME}**) "
-                                f"changed experience:\n"
-                                f"**{old_game}** → "
-                                f"**{current_game}**"
-                            )
-
-                        else:
-
-                            message = (
-                                f"🎮 "
-                                f"**{PLAYER_DISPLAY_NAME}** "
-                                f"(**{PLAYER_USERNAME}**) "
-                                f"is playing "
-                                f"**{current_game}**"
-                            )
-
-
-                    # ----------------------------------------
-                    # GAME UNKNOWN
-                    # ----------------------------------------
-
-                    else:
-
-                        message = (
-                            f"🎮 "
-                            f"**{PLAYER_DISPLAY_NAME}** "
-                            f"(**{PLAYER_USERNAME}**) "
-                            f"is in a game, but "
-                            f"Roblox didn't expose "
-                            f"the experience name."
-                        )
-
-
-                    await watch_channel.send(
-                        message
-                    )
-
-
-            else:
-
-                print(
-                    "No change."
-                )
-
-
-            return
-
-
-        # ----------------------------------------------------
-        # STATUS CHANGED
-        # ----------------------------------------------------
-
-        old_status = (
-            previous_status
-        )
-
-        previous_status = (
-            current_status
-        )
-
-        previous_game = (
-            current_game
-        )
-
-
-        print(
-            f"Status changed: "
-            f"{old_status} → "
-            f"{current_status}"
-        )
-
-
-        if watch_channel is None:
-
-            return
-
-
-        # ----------------------------------------------------
-        # ENTERED GAME
-        # ----------------------------------------------------
-
-        if current_status == "In Game":
-
-            if current_game:
-
-                message = (
-                    f"🔄 "
-                    f"**{PLAYER_DISPLAY_NAME}** "
-                    f"(**{PLAYER_USERNAME}**) "
-                    f"changed status:\n"
-                    f"**{old_status}** → "
-                    f"**In Game**\n"
-                    f"🎮 Playing: "
-                    f"**{current_game}**"
-                )
-
-            else:
-
-                message = (
-                    f"🔄 "
-                    f"**{PLAYER_DISPLAY_NAME}** "
-                    f"(**{PLAYER_USERNAME}**) "
-                    f"changed status:\n"
-                    f"**{old_status}** → "
-                    f"**In Game**\n"
-                    f"⚠️ Roblox did not expose "
-                    f"the experience name."
-                )
-
-
-        # ----------------------------------------------------
-        # LEFT GAME / OTHER STATUS
-        # ----------------------------------------------------
 
         else:
 
-            message = (
-                f"🔄 "
-                f"**{PLAYER_DISPLAY_NAME}** "
-                f"(**{PLAYER_USERNAME}**) "
-                f"changed status:\n"
-                f"**{old_status}** → "
-                f"**{current_status}**"
+            await interaction.response.send_message(
+                message,
+                ephemeral=True
             )
 
+        return
 
-        await watch_channel.send(
-            message
+    # Print unexpected errors to console
+    print(
+        f"Command error: {error}"
+    )
+
+    if interaction.response.is_done():
+
+        await interaction.followup.send(
+            "❌ Something went wrong while executing that command.",
+            ephemeral=True
         )
 
+    else:
 
-    # ========================================================
-    # ERROR HANDLING
-    # ========================================================
-
-    except requests.RequestException as error:
-
-        print(
-            f"⚠️ Roblox API error: "
-            f"{error}"
-        )
-
-    except Exception as error:
-
-        print(
-            f"⚠️ Watcher error: "
-            f"{error}"
+        await interaction.response.send_message(
+            "❌ Something went wrong while executing that command.",
+            ephemeral=True
         )
 
 
@@ -1423,6 +537,4 @@ if not TOKEN:
     )
 
 
-client.run(
-    TOKEN
-)
+client.run(TOKEN)
