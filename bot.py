@@ -45,15 +45,30 @@ GUILD = discord.Object(
 def load_settings():
 
     if not os.path.exists(SETTINGS_FILE):
+
+        print(
+            "⚠️ settings.json not found."
+        )
+
         return {}
 
-    with open(
-        SETTINGS_FILE,
-        "r",
-        encoding="utf-8"
-    ) as file:
+    try:
 
-        return json.load(file)
+        with open(
+            SETTINGS_FILE,
+            "r",
+            encoding="utf-8"
+        ) as file:
+
+            return json.load(file)
+
+    except json.JSONDecodeError:
+
+        print(
+            "⚠️ settings.json is invalid."
+        )
+
+        return {}
 
 
 def save_settings(settings):
@@ -85,11 +100,16 @@ def administrator_only():
     ):
 
         if interaction.guild is None:
+
             return False
 
-        return interaction.user.guild_permissions.administrator
+        return (
+            interaction.user.guild_permissions.administrator
+        )
 
-    return app_commands.check(predicate)
+    return app_commands.check(
+        predicate
+    )
 
 
 # ============================================================
@@ -98,10 +118,6 @@ def administrator_only():
 
 @client.event
 async def on_ready():
-
-    await tree.sync(
-        guild=GUILD
-    )
 
     print(
         f"Logged in as {client.user}!"
@@ -112,8 +128,44 @@ async def on_ready():
     )
 
     print(
-        "Slash commands synced."
+        "Local commands:"
     )
+
+    for command in tree.get_commands(
+        guild=GUILD
+    ):
+
+        print(
+            f"  /{command.name}"
+        )
+
+    # ========================================================
+    # SYNC COMMANDS
+    # ========================================================
+
+    try:
+
+        synced = await tree.sync(
+            guild=GUILD
+        )
+
+        print(
+            f"Slash commands synced: "
+            f"{len(synced)}"
+        )
+
+        for command in synced:
+
+            print(
+                f"  Registered: /{command.name}"
+            )
+
+    except Exception as error:
+
+        print(
+            f"❌ Failed to sync slash commands: "
+            f"{error}"
+        )
 
 
 # ============================================================
@@ -204,9 +256,14 @@ async def rip(
     user: discord.Member
 ):
 
-    guild_id = str(interaction.guild.id)
+    guild_id = str(
+        interaction.guild.id
+    )
 
-    # Check if a death role has been configured
+    # --------------------------------------------------------
+    # Check death role configuration
+    # --------------------------------------------------------
+
     if guild_id not in settings:
 
         await interaction.response.send_message(
@@ -242,7 +299,10 @@ async def rip(
 
         return
 
+    # --------------------------------------------------------
     # Already dead?
+    # --------------------------------------------------------
+
     if death_role in user.roles:
 
         await interaction.response.send_message(
@@ -251,6 +311,10 @@ async def rip(
         )
 
         return
+
+    # --------------------------------------------------------
+    # Bot role
+    # --------------------------------------------------------
 
     bot_member = interaction.guild.me
 
@@ -263,7 +327,10 @@ async def rip(
 
         return
 
-    # Check target's highest role against bot's highest role
+    # --------------------------------------------------------
+    # Target role check
+    # --------------------------------------------------------
+
     if user.top_role >= bot_member.top_role:
 
         await interaction.response.send_message(
@@ -273,7 +340,10 @@ async def rip(
 
         return
 
-    # Check the death role itself
+    # --------------------------------------------------------
+    # Death role check
+    # --------------------------------------------------------
+
     if death_role >= bot_member.top_role:
 
         await interaction.response.send_message(
@@ -282,6 +352,10 @@ async def rip(
         )
 
         return
+
+    # --------------------------------------------------------
+    # Give role
+    # --------------------------------------------------------
 
     try:
 
@@ -299,7 +373,10 @@ async def rip(
 
         return
 
-    # Public announcement
+    # --------------------------------------------------------
+    # Announcement
+    # --------------------------------------------------------
+
     await interaction.response.send_message(
         f"💀 {user.mention} has been ripped in half."
     )
@@ -323,9 +400,14 @@ async def revive(
     user: discord.Member
 ):
 
-    guild_id = str(interaction.guild.id)
+    guild_id = str(
+        interaction.guild.id
+    )
 
-    # Check if a death role has been configured
+    # --------------------------------------------------------
+    # Check death role configuration
+    # --------------------------------------------------------
+
     if guild_id not in settings:
 
         await interaction.response.send_message(
@@ -361,7 +443,10 @@ async def revive(
 
         return
 
+    # --------------------------------------------------------
     # Already alive?
+    # --------------------------------------------------------
+
     if death_role not in user.roles:
 
         await interaction.response.send_message(
@@ -370,6 +455,10 @@ async def revive(
         )
 
         return
+
+    # --------------------------------------------------------
+    # Bot role
+    # --------------------------------------------------------
 
     bot_member = interaction.guild.me
 
@@ -391,6 +480,10 @@ async def revive(
 
         return
 
+    # --------------------------------------------------------
+    # Remove role
+    # --------------------------------------------------------
+
     try:
 
         await user.remove_roles(
@@ -407,7 +500,10 @@ async def revive(
 
         return
 
-    # Public announcement
+    # --------------------------------------------------------
+    # Announcement
+    # --------------------------------------------------------
+
     await interaction.response.send_message(
         f"❤️ {user.mention} has been revived."
     )
@@ -479,6 +575,10 @@ async def on_app_command_error(
     error: app_commands.AppCommandError
 ):
 
+    # --------------------------------------------------------
+    # Permission failure
+    # --------------------------------------------------------
+
     if isinstance(
         error,
         app_commands.CheckFailure
@@ -489,39 +589,76 @@ async def on_app_command_error(
             "to use Larper of Yesterday commands."
         )
 
+        try:
+
+            if interaction.response.is_done():
+
+                await interaction.followup.send(
+                    message,
+                    ephemeral=True
+                )
+
+            else:
+
+                await interaction.response.send_message(
+                    message,
+                    ephemeral=True
+                )
+
+        except discord.NotFound:
+
+            print(
+                "⚠️ Interaction expired before "
+                "the permission error could be sent."
+            )
+
+        return
+
+    # --------------------------------------------------------
+    # Command not found
+    # --------------------------------------------------------
+
+    if isinstance(
+        error,
+        app_commands.CommandNotFound
+    ):
+
+        print(
+            f"❌ Discord sent an unknown command: "
+            f"{error}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Unexpected error
+    # --------------------------------------------------------
+
+    print(
+        f"Command error: {error}"
+    )
+
+    try:
+
         if interaction.response.is_done():
 
             await interaction.followup.send(
-                message,
+                "❌ Something went wrong while executing that command.",
                 ephemeral=True
             )
 
         else:
 
             await interaction.response.send_message(
-                message,
+                "❌ Something went wrong while executing that command.",
                 ephemeral=True
             )
 
-        return
+    except discord.NotFound:
 
-    # Print unexpected errors to console
-    print(
-        f"Command error: {error}"
-    )
-
-    if interaction.response.is_done():
-
-        await interaction.followup.send(
-            "❌ Something went wrong while executing that command.",
-            ephemeral=True
-        )
-
-    else:
-
-        await interaction.response.send_message(
-            "❌ Something went wrong while executing that command.",
-            ephemeral=True
+        print(
+            "⚠️ Interaction expired before "
+            "the error message could be sent."
         )
 
 
